@@ -19,7 +19,37 @@ GOOGLE_SCOPES = [
 ]
 # Mobile redirect URI - you'll need to update this
 REDIRECT_URI = 'com.yourapp.healthmusic://oauth/google'  # Custom scheme for mobile
+@router.get("/callback")
+async def callback(request: Request):
+    if request.query_params.get('error'):
+        raise HTTPException(status_code=400, detail=f"OAuth error: {request.query_params.get('error')}")
 
+    code = request.query_params.get('code')
+    state = request.query_params.get('state')
+
+    if not code:
+        raise HTTPException(status_code=400, detail="No code received from Google")
+
+    # optional: validate state (if you're storing it in session)
+
+    flow = Flow.from_client_secrets_file(
+        CLIENT_SECRETS_FILE,
+        scopes=GOOGLE_SCOPES,
+        redirect_uri=REDIRECT_URI
+    )
+
+    try:
+        flow.fetch_token(authorization_response=str(request.url))
+        credentials = flow.credentials
+
+        # Save credentials to session or DB
+        # request.session['credentials'] = { ... } ← optional
+
+        return RedirectResponse(url="/dashboard")  # or wherever you want to go next
+
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Callback error: {str(e)}")
+        
 @router.get("/google/authorize-url")
 async def get_google_auth_url():
     """Get Google OAuth authorization URL for mobile app"""
