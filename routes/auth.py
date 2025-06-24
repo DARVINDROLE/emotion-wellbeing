@@ -18,7 +18,7 @@ GOOGLE_SCOPES = [
     'https://www.googleapis.com/auth/fitness.sleep.read'
 ]
 # Mobile redirect URI - you'll need to update this
-REDIRECT_URI = 'com.yourapp.healthmusic://oauth/google'  # Custom scheme for mobile
+REDIRECT_URI = 'https://emotion-wellbeing.onrender.com/callback' # Custom scheme for mobile
 @router.get("/authorize")
 async def authorize(request: Request):
     # Clear any existing state
