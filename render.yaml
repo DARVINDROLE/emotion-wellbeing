@@ -1,6 +1,0 @@
-services:
-  - type: web
-    name: emotion-wellbeing
-    env: python
-    buildCommand: ""
-    startCommand: gunicorn app:app
