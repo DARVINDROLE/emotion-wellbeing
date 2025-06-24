@@ -1,1 +1,5 @@
-echo "venv/" >> .gitignore
+venv/
+.env
+*.json
+__pycache__/
+
