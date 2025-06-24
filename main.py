@@ -4,7 +4,7 @@ import os
 from dotenv import load_dotenv
 
 from starlette.middleware.sessions import SessionMiddleware
-from routers import auth  # or wherever your `auth.py` is located
+
 
 app = FastAPI()
 
