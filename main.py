@@ -1,21 +1,9 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-import os
+from starlette.middleware.sessions import SessionMiddleware
 from dotenv import load_dotenv
 
-from starlette.middleware.sessions import SessionMiddleware
-
-
-app = FastAPI()
-
-# 🔐 REQUIRED: Enable session support
-app.add_middleware(SessionMiddleware, secret_key="your-very-secret-key")
-
-# Register your router
-app.include_router(auth.router)
-
-from routes import auth
-from routes import dashboard, mental_health, spotify
+from routes import auth, dashboard, mental_health, spotify
 
 # Load environment variables
 load_dotenv()
@@ -27,10 +15,13 @@ app = FastAPI(
     version="3.0.0"
 )
 
-# Add CORS middleware for mobile apps
+# Enable session support
+app.add_middleware(SessionMiddleware, secret_key="your-very-secret-key")
+
+# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure this properly for production
+    allow_origins=["*"],  # Change this to specific domains in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -42,10 +33,11 @@ app.include_router(dashboard.router, prefix="/api/dashboard", tags=["Dashboard"]
 app.include_router(mental_health.router, prefix="/api/mental-health", tags=["Mental Health"])
 app.include_router(spotify.router, prefix="/api/spotify", tags=["Spotify"])
 
+# Health check and root routes
 @app.get("/")
 async def root():
     return {
-        "message": "Health & Music Mobile API", 
+        "message": "Health & Music Mobile API",
         "version": "3.0.0",
         "docs": "/docs",
         "status": "active"
@@ -55,6 +47,7 @@ async def root():
 async def health_check():
     return {"status": "healthy", "message": "API is running"}
 
+# For local development
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
