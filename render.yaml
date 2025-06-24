@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: my-python-api
+    runtime: python
+    buildCommand: ""
+    startCommand: "python main.py"
+    envVars:
+      - key: GOOGLE_APPLICATION_CREDENTIALS
+        value: firebase_service_account.json

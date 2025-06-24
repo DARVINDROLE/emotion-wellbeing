@@ -1,0 +1,713 @@
+//main.py
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+import os
+from dotenv import load_dotenv
+
+from routes import auth, dashboard, mental_health, spotify
+
+# Load environment variables
+load_dotenv()
+
+# FastAPI app initialization
+app = FastAPI(
+    title="Health & Music Mobile API",
+    description="RESTful API for mobile app - Google Fit data, Spotify listening activity, and mental health tracking",
+    version="3.0.0"
+)
+
+# Add CORS middleware for mobile apps
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Configure this properly for production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Include routers
+app.include_router(auth.router, prefix="/api/auth", tags=["Authentication"])
+app.include_router(dashboard.router, prefix="/api/dashboard", tags=["Dashboard"])
+app.include_router(mental_health.router, prefix="/api/mental-health", tags=["Mental Health"])
+app.include_router(spotify.router, prefix="/api/spotify", tags=["Spotify"])
+
+@app.get("/")
+async def root():
+    return {
+        "message": "Health & Music Mobile API", 
+        "version": "3.0.0",
+        "docs": "/docs",
+        "status": "active"
+    }
+
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "message": "API is running"}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+
+
+//database/session_manager.py
+import json
+import os
+import uuid
+from datetime import datetime, timedelta
+from typing import Dict, Optional
+from models.auth import UserSession
+
+class SessionManager:
+    def __init__(self, file_path: str = "user_sessions.json"):
+        self.file_path = file_path
+        self._ensure_file_exists()
+    
+    def _ensure_file_exists(self):
+        if not os.path.exists(self.file_path):
+            with open(self.file_path, 'w') as f:
+                json.dump({}, f)
+    
+    def _load_sessions(self) -> Dict:
+        try:
+            with open(self.file_path, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Error loading sessions: {e}")
+            return {}
+    
+    def _save_sessions(self, sessions: Dict) -> bool:
+        try:
+            with open(self.file_path, 'w') as f:
+                json.dump(sessions, f, indent=2)
+            return True
+        except Exception as e:
+            print(f"Error saving sessions: {e}")
+            return False
+    
+    def create_session(self, google_credentials: dict = None, spotify_token: dict = None) -> str:
+        user_id = str(uuid.uuid4())
+        session = UserSession(
+            user_id=user_id,
+            google_credentials=google_credentials,
+            spotify_token=spotify_token,
+            created_at=datetime.now().isoformat()
+        )
+        
+        sessions = self._load_sessions()
+        sessions[user_id] = session.dict()
+        self._save_sessions(sessions)
+        return user_id
+    
+    def get_session(self, user_id: str) -> Optional[UserSession]:
+        sessions = self._load_sessions()
+        session_data = sessions.get(user_id)
+        if session_data:
+            return UserSession(**session_data)
+        return None
+    
+    def update_session(self, user_id: str, google_credentials: dict = None, spotify_token: dict = None) -> bool:
+        sessions = self._load_sessions()
+        if user_id in sessions:
+            if google_credentials:
+                sessions[user_id]['google_credentials'] = google_credentials
+            if spotify_token:
+                sessions[user_id]['spotify_token'] = spotify_token
+            return self._save_sessions(sessions)
+        return False
+    
+    def delete_session(self, user_id: str) -> bool:
+        sessions = self._load_sessions()
+        if user_id in sessions:
+            del sessions[user_id]
+            return self._save_sessions(sessions)
+        return False
+
+# Global session manager instance
+session_manager = SessionManager()
+
+
+//models/api_response.py
+from pydantic import BaseModel
+from typing import Optional, Any, List
+
+class ApiResponse(BaseModel):
+    success: bool
+    message: str
+    data: Optional[Any] = None
+    error: Optional[str] = None
+
+class ErrorResponse(BaseModel):
+    success: bool = False
+    error: str
+    message: str
+    status_code: int
+
+
+//routes/auth.py
+import os
+import uuid
+from fastapi import APIRouter, HTTPException, Header
+from fastapi.responses import JSONResponse
+from google_auth_oauthlib.flow import Flow
+from typing import Optional
+from models.auth import AuthTokenRequest, AuthTokenResponse, UserSession
+from models.api_response import ApiResponse
+from database.session_manager import session_manager
+
+router = APIRouter()
+
+CLIENT_SECRETS_FILE = "client_secret.json"
+GOOGLE_SCOPES = [
+    'https://www.googleapis.com/auth/fitness.activity.read',
+    'https://www.googleapis.com/auth/fitness.heart_rate.read',
+    'https://www.googleapis.com/auth/fitness.sleep.read'
+]
+# Mobile redirect URI - you'll need to update this
+REDIRECT_URI = 'com.yourapp.healthmusic://oauth/google'  # Custom scheme for mobile
+
+@router.get("/google/authorize-url")
+async def get_google_auth_url():
+    """Get Google OAuth authorization URL for mobile app"""
+    try:
+        state = str(uuid.uuid4())
+        
+        flow = Flow.from_client_secrets_file(
+            CLIENT_SECRETS_FILE,
+            scopes=GOOGLE_SCOPES,
+            redirect_uri=REDIRECT_URI
+        )
+
+        auth_url, _ = flow.authorization_url(
+            access_type='offline',
+            include_granted_scopes='true',
+            state=state,
+            prompt='consent'
+        )
+        
+        return ApiResponse(
+            success=True,
+            message="Authorization URL generated successfully",
+            data={
+                "auth_url": auth_url,
+                "state": state,
+                "redirect_uri": REDIRECT_URI
+            }
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate auth URL: {str(e)}")
+
+@router.post("/google/exchange-token")
+async def exchange_google_token(auth_request: AuthTokenRequest):
+    """Exchange authorization code for access token"""
+    try:
+        flow = Flow.from_client_secrets_file(
+            CLIENT_SECRETS_FILE,
+            scopes=GOOGLE_SCOPES,
+            redirect_uri=REDIRECT_URI,
+            state=auth_request.state
+        )
+
+        # Construct the authorization response URL
+        auth_response = f"{REDIRECT_URI}?code={auth_request.code}&state={auth_request.state}"
+        flow.fetch_token(authorization_response=auth_response)
+        
+        credentials = flow.credentials
+        
+        from services.google_fit import google_fit_service
+        credentials_dict = google_fit_service.credentials_to_dict(credentials)
+        
+        # Create user session
+        user_id = session_manager.create_session(google_credentials=credentials_dict)
+        
+        return AuthTokenResponse(
+            access_token=credentials.token,
+            refresh_token=credentials.refresh_token,
+            expires_in=3600,  # 1 hour default
+            user_id=user_id
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Token exchange failed: {str(e)}")
+
+@router.post("/refresh-token")
+async def refresh_google_token(user_id: str = Header(..., alias="X-User-ID")):
+    """Refresh Google access token"""
+    try:
+        session = session_manager.get_session(user_id)
+        if not session or not session.google_credentials:
+            raise HTTPException(status_code=401, detail="No valid session found")
+        
+        from services.google_fit import google_fit_service
+        creds = google_fit_service.credentials_from_dict(session.google_credentials)
+        refreshed_creds = google_fit_service.refresh_credentials_if_needed(creds)
+        
+        # Update session with new credentials
+        updated_creds_dict = google_fit_service.credentials_to_dict(refreshed_creds)
+        session_manager.update_session(user_id, google_credentials=updated_creds_dict)
+        
+        return ApiResponse(
+            success=True,
+            message="Token refreshed successfully",
+            data={
+                "access_token": refreshed_creds.token,
+                "expires_in": 3600
+            }
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Token refresh failed: {str(e)}")
+
+@router.get("/session")
+async def get_session_info(user_id: str = Header(..., alias="X-User-ID")):
+    """Get current session information"""
+    session = session_manager.get_session(user_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    return ApiResponse(
+        success=True,
+        message="Session retrieved successfully",
+        data={
+            "user_id": session.user_id,
+            "has_google_auth": session.google_credentials is not None,
+            "has_spotify_auth": session.spotify_token is not None,
+            "created_at": session.created_at
+        }
+    )
+
+@router.delete("/logout")
+async def logout(user_id: str = Header(..., alias="X-User-ID")):
+    """Logout user and clear session"""
+    success = session_manager.delete_session(user_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    return ApiResponse(
+        success=True,
+        message="Logged out successfully"
+    )
+
+
+//routes/dashboard.py
+from fastapi import APIRouter, HTTPException, Header
+from services.google_fit import google_fit_service
+from services.spotify import SpotifyService
+from models.api_response import ApiResponse
+from models.fitness import DashboardData
+from database.session_manager import session_manager
+import os
+
+router = APIRouter()
+
+spotify_service = SpotifyService(
+    client_id=os.getenv("SPOTIFY_CLIENT_ID"),
+    client_secret=os.getenv("SPOTIFY_CLIENT_SECRET")
+)
+
+@router.get("/")
+async def get_dashboard_data(user_id: str = Header(..., alias="X-User-ID")):
+    """Get complete dashboard data for mobile app"""
+    try:
+        session = session_manager.get_session(user_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        # Initialize response data
+        step_data, heart_rate_data, sleep_data = [], [], []
+        current_track = None
+        recent_tracks = []
+        spotify_connected = False
+
+        # Get Google Fit data if authenticated
+        if session.google_credentials:
+            try:
+                step_data, heart_rate_data, sleep_data, updated_credentials = await google_fit_service.get_fitness_data(
+                    session.google_credentials
+                )
+                # Update session with refreshed credentials if needed
+                session_manager.update_session(user_id, google_credentials=updated_credentials)
+            except Exception as e:
+                print(f"Error fetching fitness data: {e}")
+
+        # Get Spotify data if authenticated
+        if session.spotify_token:
+            spotify_connected = True
+            access_token = session.spotify_token['access_token']
+            
+            try:
+                current_track = await spotify_service.get_current_track(access_token)
+                recent_tracks = await spotify_service.get_recent_tracks(access_token, limit=5)
+            except Exception as e:
+                print(f"Error fetching Spotify data: {e}")
+
+        dashboard_data = DashboardData(
+            step_data=step_data,
+            heart_rate_data=heart_rate_data,
+            sleep_data=sleep_data,
+            current_track=current_track,
+            recent_tracks=recent_tracks,
+            spotify_connected=spotify_connected
+        )
+
+        return ApiResponse(
+            success=True,
+            message="Dashboard data retrieved successfully",
+            data=dashboard_data.dict()
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get dashboard data: {str(e)}")
+
+@router.get("/fitness")
+async def get_fitness_data(user_id: str = Header(..., alias="X-User-ID")):
+    """Get only fitness data"""
+    try:
+        session = session_manager.get_session(user_id)
+        if not session or not session.google_credentials:
+            raise HTTPException(status_code=401, detail="Google Fit not connected")
+
+        step_data, heart_rate_data, sleep_data, updated_credentials = await google_fit_service.get_fitness_data(
+            session.google_credentials
+        )
+        
+        # Update session with refreshed credentials
+        session_manager.update_session(user_id, google_credentials=updated_credentials)
+
+        return ApiResponse(
+            success=True,
+            message="Fitness data retrieved successfully",
+            data={
+                "step_data": [step.dict() for step in step_data],
+                "heart_rate_data": [hr.dict() for hr in heart_rate_data],
+                "sleep_data": [sleep.dict() for sleep in sleep_data]
+            }
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get fitness data: {str(e)}")
+
+
+//routes/mental_health.py
+from fastapi import APIRouter, HTTPException, Header
+from typing import List
+from models.mental_health import Condition, ConditionCreate, Medication, MedicationCreate
+from models.api_response import ApiResponse
+from database.mental_health_db import mental_health_db
+
+router = APIRouter()
+
+@router.get("/conditions")
+async def get_conditions(user_id: str = Header(..., alias="X-User-ID")):
+    """Get user's mental health conditions"""
+    try:
+        conditions = mental_health_db.get_conditions(user_id)
+        return ApiResponse(
+            success=True,
+            message="Conditions retrieved successfully",
+            data=[condition.dict() for condition in conditions]
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get conditions: {str(e)}")
+
+@router.post("/conditions")
+async def add_condition(
+    condition: ConditionCreate,
+    user_id: str = Header(..., alias="X-User-ID")
+):
+    """Add new mental health condition"""
+    try:
+        new_condition = mental_health_db.add_condition(user_id, condition)
+        return ApiResponse(
+            success=True,
+            message="Condition added successfully",
+            data=new_condition.dict()
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to add condition: {str(e)}")
+
+@router.delete("/conditions/{condition_id}")
+async def delete_condition(
+    condition_id: str,
+    user_id: str = Header(..., alias="X-User-ID")
+):
+    """Delete mental health condition"""
+    try:
+        success = mental_health_db.delete_condition(user_id, condition_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="Condition not found")
+        
+        return ApiResponse(
+            success=True,
+            message="Condition deleted successfully"
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete condition: {str(e)}")
+
+@router.get("/medications")
+async def get_medications(user_id: str = Header(..., alias="X-User-ID")):
+    """Get user's medications"""
+    try:
+        medications = mental_health_db.get_medications(user_id)
+        return ApiResponse(
+            success=True,
+            message="Medications retrieved successfully",
+            data=[medication.dict() for medication in medications]
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get medications: {str(e)}")
+
+@router.post("/medications")
+async def add_medication(
+    medication: MedicationCreate,
+    user_id: str = Header(..., alias="X-User-ID")
+):
+    """Add new medication"""
+    try:
+        new_medication = mental_health_db.add_medication(user_id, medication)
+        return ApiResponse(
+            success=True,
+            message="Medication added successfully",
+            data=new_medication.dict()
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to add medication: {str(e)}")
+
+@router.delete("/medications/{medication_id}")
+async def delete_medication(
+    medication_id: str,
+    user_id: str = Header(..., alias="X-User-ID")
+):
+    """Delete medication"""
+    try:
+        success = mental_health_db.delete_medication(user_id, medication_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="Medication not found")
+        
+        return ApiResponse(
+            success=True,
+            message="Medication deleted successfully"
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete medication: {str(e)}")
+
+@router.put("/medications/{medication_id}/toggle")
+async def toggle_medication(
+    medication_id: str,
+    user_id: str = Header(..., alias="X-User-ID")
+):
+    """Toggle medication active status"""
+    try:
+        success = mental_health_db.toggle_medication(user_id, medication_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="Medication not found")
+        
+        return ApiResponse(
+            success=True,
+            message="Medication status updated successfully"
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update medication: {str(e)}")
+
+
+//models/spotify.py
+import uuid
+import os
+from fastapi import APIRouter, HTTPException, Header
+from services.spotify import SpotifyService
+from models.auth import SpotifyAuthRequest, SpotifyAuthResponse
+from models.api_response import ApiResponse
+from database.session_manager import session_manager
+
+router = APIRouter()
+
+# Initialize Spotify service with mobile redirect URI
+spotify_service = SpotifyService(
+    client_id=os.getenv("5bc3a32f5662485586dd111be225164b"),
+    client_secret=os.getenv("09052b4c6cb3482db6c783d9e9dc6c87"),
+    redirect_uri='com.yourapp.healthmusic://callback'  # Mobile custom scheme
+)
+
+@router.get("/authorize-url")
+async def get_spotify_auth_url():
+    """Get Spotify OAuth authorization URL for mobile app"""
+    try:
+        state = str(uuid.uuid4())
+        auth_url = spotify_service.get_auth_url(state)
+        
+        return ApiResponse(
+            success=True,
+            message="Spotify authorization URL generated successfully",
+            data={
+                "auth_url": auth_url,
+                "state": state,
+                "redirect_uri": spotify_service.redirect_uri
+            }
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate Spotify auth URL: {str(e)}")
+
+@router.post("/exchange-token")
+async def exchange_spotify_token(
+    auth_request: SpotifyAuthRequest,
+    user_id: str = Header(..., alias="X-User-ID")
+):
+    """Exchange Spotify authorization code for access token"""
+    try:
+        token_data = await spotify_service.exchange_code_for_token(auth_request.code)
+        
+        # Update user session with Spotify token
+        session_manager.update_session(user_id, spotify_token=token_data)
+        
+        return SpotifyAuthResponse(
+            access_token=token_data['access_token'],
+            refresh_token=token_data.get('refresh_token'),
+            expires_in=token_data['expires_in']
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Spotify token exchange failed: {str(e)}")
+
+@router.get("/current-track")
+async def get_current_track(user_id: str = Header(..., alias="X-User-ID")):
+    """Get currently playing Spotify track"""
+    try:
+        session = session_manager.get_session(user_id)
+        if not session or not session.spotify_token:
+            raise HTTPException(status_code=401, detail="Spotify not connected")
+        
+        access_token = session.spotify_token['access_token']
+        current_track = await spotify_service.get_current_track(access_token)
+        
+        return ApiResponse(
+            success=True,
+            message="Current track retrieved successfully",
+            data=current_track.dict() if current_track else None
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get current track: {str(e)}")
+
+@router.get("/recent-tracks")
+async def get_recent_tracks(
+    user_id: str = Header(..., alias="X-User-ID"),
+    limit: int = 10
+):
+    """Get recently played Spotify tracks"""
+    try:
+        session = session_manager.get_session(user_id)
+        if not session or not session.spotify_token:
+            raise HTTPException(status_code=401, detail="Spotify not connected")
+        
+        access_token = session.spotify_token['access_token']
+        recent_tracks = await spotify_service.get_recent_tracks(access_token, limit)
+        
+        return ApiResponse(
+            success=True,
+            message="Recent tracks retrieved successfully",
+            data=[track.dict() for track in recent_tracks]
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get recent tracks: {str(e)}")
+
+
+//services/spotify.py
+# ==== services/spotify.py (Updated) ====
+import base64
+from typing import Optional, List
+import httpx
+from models.fitness import SpotifyTrack
+
+class SpotifyService:
+    def __init__(self, client_id: str, client_secret: str, redirect_uri: str = None):
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.redirect_uri = redirect_uri or 'com.yourapp.healthmusic://callback'
+        self.scopes = "user-read-playback-state user-read-recently-played"
+        
+    def get_auth_url(self, state: str) -> str:
+        from urllib.parse import urlencode
+        params = {
+            'client_id': self.client_id,
+            'response_type': 'code',
+            'redirect_uri': self.redirect_uri,
+            'scope': self.scopes,
+            'state': state
+        }
+        return f"https://accounts.spotify.com/authorize?{urlencode(params)}"
+    
+    async def exchange_code_for_token(self, code: str) -> dict:
+        token_url = "https://accounts.spotify.com/api/token"
+        auth_header = base64.b64encode(f"{self.client_id}:{self.client_secret}".encode()).decode()
+
+        data = {
+            'grant_type': 'authorization_code',
+            'code': code,
+            'redirect_uri': self.redirect_uri,
+        }
+
+        headers = {
+            'Authorization': f'Basic {auth_header}',
+            'Content-Type': 'application/x-www-form-urlencoded'
+        }
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(token_url, data=data, headers=headers)
+            
+        if response.status_code != 200:
+            raise Exception(f"Failed to exchange code for token: {response.text}")
+        
+        return response.json()
+    
+    async def get_current_track(self, access_token: str) -> Optional[SpotifyTrack]:
+        headers = {'Authorization': f'Bearer {access_token}'}
+        
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    'https://api.spotify.com/v1/me/player/currently-playing',
+                    headers=headers
+                )
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data and data.get("item"):
+                    return SpotifyTrack(
+                        name=data["item"]["name"],
+                        artist=data["item"]["artists"][0]["name"],
+                        album=data["item"]["album"]["name"],
+                        image=data["item"]["album"]["images"][0]["url"] if data["item"]["album"]["images"] else None
+                    )
+        except Exception as e:
+            print(f"Error fetching current track: {e}")
+        
+        return None
+    
+    async def get_recent_tracks(self, access_token: str, limit: int = 5) -> List[SpotifyTrack]:
+        headers = {'Authorization': f'Bearer {access_token}'}
+        tracks = []
+        
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f'https://api.spotify.com/v1/me/player/recently-played?limit={limit}',
+                    headers=headers
+                )
+            
+            if response.status_code == 200:
+                data = response.json()
+                for item in data.get("items", []):
+                    track = item["track"]
+                    tracks.append(SpotifyTrack(
+                        name=track["name"],
+                        artist=track["artists"][0]["name"],
+                        played_at=item["played_at"],
+                        image=track["album"]["images"][0]["url"] if track["album"]["images"] else None
+                    ))
+        except Exception as e:
+            print(f"Error fetching recent tracks: {e}")
+        
+        return tracks
+
