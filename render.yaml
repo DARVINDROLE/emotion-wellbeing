@@ -3,4 +3,4 @@ services:
     name: emotion-wellbeing
     env: python
     buildCommand: ""
-    startCommand: gunicorn your_application:app
+    startCommand: gunicorn app:app
