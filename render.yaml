@@ -2,8 +2,9 @@ services:
   - type: web
     name: my-python-api
     runtime: python
-    buildCommand: ""
-    startCommand: "python main.py"
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "uvicorn main:app --host=0.0.0.0 --port=10000"
     envVars:
       - key: GOOGLE_APPLICATION_CREDENTIALS
         value: firebase_service_account.json
+
