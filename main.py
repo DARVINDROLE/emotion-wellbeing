@@ -3,6 +3,17 @@ from fastapi.middleware.cors import CORSMiddleware
 import os
 from dotenv import load_dotenv
 
+from starlette.middleware.sessions import SessionMiddleware
+from routers import auth  # or wherever your `auth.py` is located
+
+app = FastAPI()
+
+# 🔐 REQUIRED: Enable session support
+app.add_middleware(SessionMiddleware, secret_key="your-very-secret-key")
+
+# Register your router
+app.include_router(auth.router)
+
 from routes import auth
 from routes import dashboard, mental_health, spotify
 
