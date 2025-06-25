@@ -10,7 +10,23 @@ import os
 from dotenv import load_dotenv
 
 from routes import auth, dashboard, mental_health, spotify
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from routes import auth  # Import your router
 
+app = FastAPI()
+
+# ✅ Add this to allow your frontend to connect
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://127.0.0.1:5500"],  # 👈 your local Live Server
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ✅ Then include your routes
+app.include_router(auth)
 # Load environment variables
 load_dotenv()
 
