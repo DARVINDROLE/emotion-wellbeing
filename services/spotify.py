@@ -7,7 +7,7 @@ class SpotifyService:
     def __init__(self, client_id: str, client_secret: str):
         self.client_id = client_id
         self.client_secret = client_secret
-        self.redirect_uri = 'http://127.0.0.1:5000/spotify/callback'
+        self.redirect_uri = 'https://emotion-wellbeing.onrender.com/spotify/callback'
         self.scopes = "user-read-playback-state user-read-recently-played"
     
     def get_auth_url(self, state: str) -> str:
