@@ -50,4 +50,5 @@ async def root():
 # Only for local run (Render will ignore this)
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host
+    uvicorn.run("main:app", host="127.0.0.1", port=5000, reload=True)
+
