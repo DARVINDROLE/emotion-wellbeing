@@ -1,0 +1,737 @@
+# ==== main.py ====
+from fastapi import FastAPI
+from starlette.middleware.sessions import SessionMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+import os
+from dotenv import load_dotenv
+
+from routes import auth, dashboard, mental_health, spotify
+
+# Load environment variables
+load_dotenv()
+
+# FastAPI app initialization
+app = FastAPI(
+    title="Health & Music Dashboard",
+    description="Your Google Fit data, Spotify listening activity, and mental health tracking in one place",
+    version="2.0.0"
+)
+
+# Add session middleware
+app.add_middleware(
+    SessionMiddleware, 
+    secret_key=os.getenv("FLASK_SECRET_KEY", "super-secret-key-123")
+)
+
+# Include routers
+app.include_router(auth.router, tags=["Authentication"])
+app.include_router(dashboard.router, tags=["Dashboard"])
+app.include_router(mental_health.router, prefix="/api/mental-health", tags=["Mental Health"])
+app.include_router(spotify.router, prefix="/spotify", tags=["Spotify"])
+
+# Templates
+templates = Jinja2Templates(directory="templates")
+
+@app.get("/")
+async def root():
+    return {"message": "Health & Music Dashboard API", "docs": "/docs"}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="127.0.0.1", port=5000, reload=True)
+
+
+# ==== models/mental_health.py ====
+from pydantic import BaseModel, Field
+from datetime import datetime
+from typing import Optional
+from enum import Enum
+
+class SeverityLevel(str, Enum):
+    MILD = "mild"
+    MODERATE = "moderate"
+    SEVERE = "severe"
+
+class ConditionBase(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    diagnosed_date: Optional[str] = None
+    severity: SeverityLevel = SeverityLevel.MILD
+    notes: Optional[str] = None
+
+class ConditionCreate(ConditionBase):
+    pass
+
+class Condition(ConditionBase):
+    id: str
+    created_at: str
+
+    class Config:
+        from_attributes = True
+
+class MedicationBase(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    dosage: Optional[str] = None
+    frequency: Optional[str] = None
+    started_date: Optional[str] = None
+    prescribing_doctor: Optional[str] = None
+    notes: Optional[str] = None
+    active: bool = True
+
+class MedicationCreate(MedicationBase):
+    pass
+
+class Medication(MedicationBase):
+    id: str
+    created_at: str
+
+    class Config:
+        from_attributes = True
+
+
+# ==== models/fitness.py ====
+from pydantic import BaseModel
+from typing import Optional, List
+
+class StepData(BaseModel):
+    date: str
+    steps: int
+
+class HeartRateData(BaseModel):
+    date: str
+    bpm: float
+
+class SleepData(BaseModel):
+    date: str
+    stage: int
+
+class SpotifyTrack(BaseModel):
+    name: str
+    artist: str
+    album: Optional[str] = None
+    image: Optional[str] = None
+    played_at: Optional[str] = None
+
+class DashboardData(BaseModel):
+    step_data: List[StepData]
+    heart_rate_data: List[HeartRateData]
+    sleep_data: List[SleepData]
+    current_track: Optional[SpotifyTrack]
+    recent_tracks: List[SpotifyTrack]
+    spotify_connected: bool
+
+
+# ==== database/mental_health_db.py ====
+import json
+import os
+import uuid
+from datetime import datetime
+from typing import Dict, List, Optional
+from models.mental_health import Condition, ConditionCreate, Medication, MedicationCreate
+
+class MentalHealthDB:
+    def __init__(self, file_path: str = "mental_health_data.json"):
+        self.file_path = file_path
+        self._ensure_file_exists()
+    
+    def _ensure_file_exists(self):
+        if not os.path.exists(self.file_path):
+            with open(self.file_path, 'w') as f:
+                json.dump({}, f)
+    
+    def _load_data(self) -> Dict:
+        try:
+            with open(self.file_path, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Error loading data: {e}")
+            return {}
+    
+    def _save_data(self, data: Dict) -> bool:
+        try:
+            with open(self.file_path, 'w') as f:
+                json.dump(data, f, indent=2)
+            return True
+        except Exception as e:
+            print(f"Error saving data: {e}")
+            return False
+    
+    def get_user_data(self, user_id: str) -> Dict:
+        all_data = self._load_data()
+        return all_data.get(user_id, {'conditions': [], 'medications': []})
+    
+    def save_user_data(self, user_id: str, user_data: Dict) -> bool:
+        all_data = self._load_data()
+        all_data[user_id] = user_data
+        return self._save_data(all_data)
+    
+    # Condition methods
+    def get_conditions(self, user_id: str) -> List[Condition]:
+        user_data = self.get_user_data(user_id)
+        return [Condition(**condition) for condition in user_data['conditions']]
+    
+    def add_condition(self, user_id: str, condition_data: ConditionCreate) -> Condition:
+        user_data = self.get_user_data(user_id)
+        new_condition = Condition(
+            id=str(uuid.uuid4()),
+            created_at=datetime.now().isoformat(),
+            **condition_data.dict()
+        )
+        user_data['conditions'].append(new_condition.dict())
+        self.save_user_data(user_id, user_data)
+        return new_condition
+    
+    def delete_condition(self, user_id: str, condition_id: str) -> bool:
+        user_data = self.get_user_data(user_id)
+        user_data['conditions'] = [
+            c for c in user_data['conditions'] if c['id'] != condition_id
+        ]
+        return self.save_user_data(user_id, user_data)
+    
+    # Medication methods
+    def get_medications(self, user_id: str) -> List[Medication]:
+        user_data = self.get_user_data(user_id)
+        return [Medication(**medication) for medication in user_data['medications']]
+    
+    def add_medication(self, user_id: str, medication_data: MedicationCreate) -> Medication:
+        user_data = self.get_user_data(user_id)
+        new_medication = Medication(
+            id=str(uuid.uuid4()),
+            created_at=datetime.now().isoformat(),
+            **medication_data.dict()
+        )
+        user_data['medications'].append(new_medication.dict())
+        self.save_user_data(user_id, user_data)
+        return new_medication
+    
+    def delete_medication(self, user_id: str, medication_id: str) -> bool:
+        user_data = self.get_user_data(user_id)
+        user_data['medications'] = [
+            m for m in user_data['medications'] if m['id'] != medication_id
+        ]
+        return self.save_user_data(user_id, user_data)
+    
+    def toggle_medication(self, user_id: str, medication_id: str) -> bool:
+        user_data = self.get_user_data(user_id)
+        for medication in user_data['medications']:
+            if medication['id'] == medication_id:
+                medication['active'] = not medication.get('active', True)
+                break
+        return self.save_user_data(user_id, user_data)
+
+# Global database instance
+mental_health_db = MentalHealthDB()
+
+
+# ==== services/google_fit.py ====
+import httpx
+from fastapi import HTTPException
+import os
+from typing import List, Tuple, Optional
+from datetime import datetime, timedelta
+import requests
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request as GoogleRequest
+from models.fitness import StepData, HeartRateData, SleepData
+
+class GoogleFitService:
+    def __init__(self):
+        self.scopes = [
+            'https://www.googleapis.com/auth/fitness.activity.read',
+            'https://www.googleapis.com/auth/fitness.heart_rate.read',
+            'https://www.googleapis.com/auth/fitness.sleep.read'
+        ]
+    
+    def credentials_from_dict(self, creds_dict: dict) -> Credentials:
+        expiry = None
+        if creds_dict.get('expiry'):
+            try:
+                expiry = datetime.fromisoformat(creds_dict['expiry'].replace('Z', '+00:00'))
+            except Exception as e:
+                print(f"Error parsing expiry date: {e}")
+        
+        return Credentials(
+            token=creds_dict['token'],
+            refresh_token=creds_dict['refresh_token'],
+            token_uri=creds_dict['token_uri'],
+            client_id=creds_dict['client_id'],
+            client_secret=creds_dict['client_secret'],
+            scopes=creds_dict['scopes'],
+            expiry=expiry
+        )
+    
+    def credentials_to_dict(self, credentials: Credentials) -> dict:
+        return {
+            'token': credentials.token,
+            'refresh_token': credentials.refresh_token,
+            'token_uri': credentials.token_uri,
+            'client_id': credentials.client_id,
+            'client_secret': credentials.client_secret,
+            'scopes': credentials.scopes,
+            'expiry': credentials.expiry.isoformat() if credentials.expiry else None
+        }
+    
+    def refresh_credentials_if_needed(self, creds: Credentials) -> Credentials:
+        if creds.expired and creds.refresh_token:
+            try:
+                print("Refreshing expired credentials...")
+                creds.refresh(GoogleRequest())
+                return creds
+            except Exception as e:
+                print(f"Failed to refresh credentials: {e}")
+                raise HTTPException(status_code=401, detail="Failed to refresh credentials")
+        return creds
+    
+    async def get_fitness_data(self, credentials_dict: dict) -> Tuple[List[StepData], List[HeartRateData], List[SleepData]]:
+        creds = self.credentials_from_dict(credentials_dict)
+        creds = self.refresh_credentials_if_needed(creds)
+        
+        # Prepare time range (last 7 days)
+        end_time = datetime.now()
+        start_time = end_time - timedelta(days=7)
+        start_time_millis = int(start_time.timestamp() * 1000)
+        end_time_millis = int(end_time.timestamp() * 1000)
+
+        headers = {
+            'Authorization': f'Bearer {creds.token}',
+            'Content-Type': 'application/json'
+        }
+
+        data = {
+            "aggregateBy": [
+                {"dataTypeName": "com.google.step_count.delta"},
+                {"dataTypeName": "com.google.heart_rate.bpm"},
+                {"dataTypeName": "com.google.sleep.segment"}
+            ],
+            "bucketByTime": {"durationMillis": 86400000},  # 24 hours
+            "startTimeMillis": start_time_millis,
+            "endTimeMillis": end_time_millis
+        }
+
+        step_data, heart_rate_data, sleep_data = [], [], []
+        
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    'https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate',
+                    headers=headers,
+                    json=data,
+                    timeout=30
+                )
+
+            if response.status_code == 200:
+                fit_data = response.json()
+
+                for bucket in fit_data.get('bucket', []):
+                    bucket_start = datetime.fromtimestamp(int(bucket['startTimeMillis']) / 1000)
+                    date_str = bucket_start.strftime('%Y-%m-%d')
+                    
+                    for dataset in bucket.get('dataset', []):
+                        source = dataset.get('dataSourceId', '')
+                        
+                        for point in dataset.get('point', []):
+                            if 'step_count' in source:
+                                steps = point['value'][0].get('intVal', 0)
+                                step_data.append(StepData(date=date_str, steps=steps))
+                            elif 'heart_rate' in source:
+                                bpm = point['value'][0].get('fpVal', 0.0)
+                                heart_rate_data.append(HeartRateData(date=date_str, bpm=round(bpm, 1)))
+                            elif 'sleep' in source:
+                                stage = point['value'][0].get('intVal', -1)
+                                sleep_data.append(SleepData(date=date_str, stage=stage))
+
+                # Sort data by date
+                step_data.sort(key=lambda x: x.date)
+                heart_rate_data.sort(key=lambda x: x.date)
+                sleep_data.sort(key=lambda x: x.date)
+
+        except Exception as e:
+            print(f"Google Fit API error: {e}")
+            raise HTTPException(status_code=500, detail="Failed to fetch fitness data")
+
+        return step_data, heart_rate_data, sleep_data, self.credentials_to_dict(creds)
+
+google_fit_service = GoogleFitService()
+
+
+# ==== services/spotify.py ====
+import base64
+from typing import Optional, List
+import httpx
+from models.fitness import SpotifyTrack
+
+class SpotifyService:
+    def __init__(self, client_id: str, client_secret: str):
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.redirect_uri = 'http://127.0.0.1:5000/spotify/callback'
+        self.scopes = "user-read-playback-state user-read-recently-played"
+    
+    def get_auth_url(self, state: str) -> str:
+        from urllib.parse import urlencode
+        params = {
+            'client_id': self.client_id,
+            'response_type': 'code',
+            'redirect_uri': self.redirect_uri,
+            'scope': self.scopes,
+            'state': state
+        }
+        return f"https://accounts.spotify.com/authorize?{urlencode(params)}"
+    
+    async def exchange_code_for_token(self, code: str) -> dict:
+        token_url = "https://accounts.spotify.com/api/token"
+        auth_header = base64.b64encode(f"{self.client_id}:{self.client_secret}".encode()).decode()
+
+        data = {
+            'grant_type': 'authorization_code',
+            'code': code,
+            'redirect_uri': self.redirect_uri,
+        }
+
+        headers = {
+            'Authorization': f'Basic {auth_header}',
+            'Content-Type': 'application/x-www-form-urlencoded'
+        }
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(token_url, data=data, headers=headers)
+            
+        if response.status_code != 200:
+            raise HTTPException(status_code=400, detail="Failed to exchange code for token")
+        
+        return response.json()
+    
+    async def get_current_track(self, access_token: str) -> Optional[SpotifyTrack]:
+        headers = {'Authorization': f'Bearer {access_token}'}
+        
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    'https://api.spotify.com/v1/me/player/currently-playing',
+                    headers=headers
+                )
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data and data.get("item"):
+                    return SpotifyTrack(
+                        name=data["item"]["name"],
+                        artist=data["item"]["artists"][0]["name"],
+                        album=data["item"]["album"]["name"],
+                        image=data["item"]["album"]["images"][0]["url"] if data["item"]["album"]["images"] else None
+                    )
+        except Exception as e:
+            print(f"Error fetching current track: {e}")
+        
+        return None
+    
+    async def get_recent_tracks(self, access_token: str, limit: int = 5) -> List[SpotifyTrack]:
+        headers = {'Authorization': f'Bearer {access_token}'}
+        tracks = []
+        
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f'https://api.spotify.com/v1/me/player/recently-played?limit={limit}',
+                    headers=headers
+                )
+            
+            if response.status_code == 200:
+                data = response.json()
+                for item in data.get("items", []):
+                    track = item["track"]
+                    tracks.append(SpotifyTrack(
+                        name=track["name"],
+                        artist=track["artists"][0]["name"],
+                        played_at=item["played_at"],
+                        image=track["album"]["images"][0]["url"] if track["album"]["images"] else None
+                    ))
+        except Exception as e:
+            print(f"Error fetching recent tracks: {e}")
+        
+        return tracks
+
+
+# ==== routes/auth.py ====
+import os
+import uuid
+from fastapi import APIRouter, Request, HTTPException, Depends
+from fastapi.responses import RedirectResponse, HTMLResponse
+from fastapi.templating import Jinja2Templates
+from google_auth_oauthlib.flow import Flow
+
+router = APIRouter()
+templates = Jinja2Templates(directory="templates")
+
+CLIENT_SECRETS_FILE = "client_secret.json"
+GOOGLE_SCOPES = [
+    'https://www.googleapis.com/auth/fitness.activity.read',
+    'https://www.googleapis.com/auth/fitness.heart_rate.read',
+    'https://www.googleapis.com/auth/fitness.sleep.read'
+]
+REDIRECT_URI = 'http://127.0.0.1:5000/callback'
+os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
+
+@router.get("/", response_class=HTMLResponse)
+async def index(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
+
+@router.get("/authorize")
+async def authorize(request: Request):
+    # Clear any existing state
+    request.session.pop('oauth_state', None)
+    
+    state = str(uuid.uuid4())
+    request.session['oauth_state'] = state
+    
+    flow = Flow.from_client_secrets_file(
+        CLIENT_SECRETS_FILE,
+        scopes=GOOGLE_SCOPES,
+        redirect_uri=REDIRECT_URI
+    )
+
+    auth_url, _ = flow.authorization_url(
+        access_type='offline',
+        include_granted_scopes='true',
+        state=state,
+        prompt='consent'
+    )
+    
+    return RedirectResponse(url=auth_url)
+
+@router.get("/callback")
+async def callback(request: Request):
+    # Check for error parameter
+    if request.query_params.get('error'):
+        error = request.query_params.get('error')
+        error_description = request.query_params.get('error_description', 'No description provided')
+        raise HTTPException(status_code=400, detail=f"Authorization error: {error} - {error_description}")
+    
+    # Check for missing code
+    if not request.query_params.get('code'):
+        raise HTTPException(status_code=400, detail="No authorization code received")
+    
+    # State validation
+    received_state = request.query_params.get('state')
+    stored_state = request.session.get('oauth_state')
+    
+    if not received_state or not stored_state or received_state != stored_state:
+        raise HTTPException(status_code=400, detail="Invalid state parameter")
+
+    # Create flow and fetch token
+    flow = Flow.from_client_secrets_file(
+        CLIENT_SECRETS_FILE,
+        scopes=GOOGLE_SCOPES,
+        redirect_uri=REDIRECT_URI,
+        state=stored_state
+    )
+
+    try:
+        flow.fetch_token(authorization_response=str(request.url))
+        credentials = flow.credentials
+        
+        from services.google_fit import google_fit_service
+        request.session['credentials'] = google_fit_service.credentials_to_dict(credentials)
+        
+        # Clear the state after successful authentication
+        request.session.pop('oauth_state', None)
+        
+        return RedirectResponse(url="/dashboard")
+        
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error during authentication: {str(e)}")
+
+@router.get("/logout")
+async def logout(request: Request):
+    request.session.clear()
+    return RedirectResponse(url="/")
+
+
+# ==== routes/dashboard.py ====
+from fastapi import APIRouter, Request, HTTPException, Depends
+from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
+from services.google_fit import google_fit_service
+from services.spotify import SpotifyService
+from database.mental_health_db import mental_health_db
+import os
+
+router = APIRouter()
+templates = Jinja2Templates(directory="templates")
+
+# Initialize Spotify service
+spotify_service = SpotifyService(
+    client_id=os.getenv("SPOTIFY_CLIENT_ID"),
+    client_secret=os.getenv("SPOTIFY_CLIENT_SECRET")
+)
+
+def get_current_user_id(request: Request) -> str:
+    """Get current user ID from session"""
+    if 'credentials' not in request.session:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return request.session['credentials'].get('client_id', 'default_user')
+
+@router.get("/dashboard", response_class=HTMLResponse)
+async def dashboard(request: Request):
+    if 'credentials' not in request.session:
+        return RedirectResponse(url="/authorize")
+
+    # Get Google Fit data
+    try:
+        step_data, heart_rate_data, sleep_data, updated_credentials = await google_fit_service.get_fitness_data(
+            request.session['credentials']
+        )
+        # Update session with refreshed credentials if needed
+        request.session['credentials'] = updated_credentials
+    except Exception as e:
+        print(f"Error fetching fitness data: {e}")
+        step_data, heart_rate_data, sleep_data = [], [], []
+
+    # Get Spotify data
+    current_track = None
+    recent_tracks = []
+    spotify_connected = False
+    
+    token_info = request.session.get('spotify_token')
+    if token_info:
+        spotify_connected = True
+        access_token = token_info['access_token']
+        
+        try:
+            current_track = await spotify_service.get_current_track(access_token)
+            recent_tracks = await spotify_service.get_recent_tracks(access_token)
+        except Exception as e:
+            print(f"Error fetching Spotify data: {e}")
+
+    # Get mental health data
+    user_id = get_current_user_id(request)
+    mental_health_data = mental_health_db.get_user_data(user_id)
+
+    return templates.TemplateResponse("dashboard.html", {
+        "request": request,
+        "step_data": step_data,
+        "heart_rate_data": heart_rate_data,
+        "sleep_data": sleep_data,
+        "current_track": current_track,
+        "recent_tracks": recent_tracks,
+        "spotify_connected": spotify_connected,
+        "mental_health": mental_health_data
+    })
+
+
+# ==== routes/mental_health.py ====
+from fastapi import APIRouter, Request, HTTPException, Depends
+from typing import List
+from models.mental_health import Condition, ConditionCreate, Medication, MedicationCreate
+from database.mental_health_db import mental_health_db
+
+router = APIRouter()
+
+def get_current_user_id(request: Request) -> str:
+    """Get current user ID from session"""
+    if 'credentials' not in request.session:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return request.session['credentials'].get('client_id', 'default_user')
+
+@router.get("/conditions", response_model=List[Condition])
+async def get_conditions(request: Request):
+    user_id = get_current_user_id(request)
+    return mental_health_db.get_conditions(user_id)
+
+@router.post("/conditions", response_model=Condition)
+async def add_condition(condition: ConditionCreate, request: Request):
+    user_id = get_current_user_id(request)
+    return mental_health_db.add_condition(user_id, condition)
+
+@router.delete("/conditions/{condition_id}")
+async def delete_condition(condition_id: str, request: Request):
+    user_id = get_current_user_id(request)
+    success = mental_health_db.delete_condition(user_id, condition_id)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to delete condition")
+    return {"success": True}
+
+@router.get("/medications", response_model=List[Medication])
+async def get_medications(request: Request):
+    user_id = get_current_user_id(request)
+    return mental_health_db.get_medications(user_id)
+
+@router.post("/medications", response_model=Medication)
+async def add_medication(medication: MedicationCreate, request: Request):
+    user_id = get_current_user_id(request)
+    return mental_health_db.add_medication(user_id, medication)
+
+@router.delete("/medications/{medication_id}")
+async def delete_medication(medication_id: str, request: Request):
+    user_id = get_current_user_id(request)
+    success = mental_health_db.delete_medication(user_id, medication_id)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to delete medication")
+    return {"success": True}
+
+@router.put("/medications/{medication_id}/toggle")
+async def toggle_medication(medication_id: str, request: Request):
+    user_id = get_current_user_id(request)
+    success = mental_health_db.toggle_medication(user_id, medication_id)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to update medication")
+    return {"success": True}
+
+
+# ==== routes/spotify.py ====
+import uuid
+import os
+from fastapi import APIRouter, Request, HTTPException
+from fastapi.responses import RedirectResponse
+from services.spotify import SpotifyService
+
+router = APIRouter()
+
+# Initialize Spotify service
+spotify_service = SpotifyService(
+    client_id=os.getenv("SPOTIFY_CLIENT_ID"),
+    client_secret=os.getenv("SPOTIFY_CLIENT_SECRET")
+)
+
+@router.get("/authorize")
+async def spotify_authorize(request: Request):
+    state = str(uuid.uuid4())
+    request.session['spotify_state'] = state
+    
+    auth_url = spotify_service.get_auth_url(state)
+    return RedirectResponse(url=auth_url)
+
+@router.get("/callback")
+async def spotify_callback(request: Request):
+    code = request.query_params.get('code')
+    state = request.query_params.get('state')
+
+    if state != request.session.get('spotify_state'):
+        raise HTTPException(status_code=400, detail="Invalid Spotify state")
+
+    try:
+        token_data = await spotify_service.exchange_code_for_token(code)
+        request.session['spotify_token'] = token_data
+        return RedirectResponse(url="/dashboard")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to authenticate with Spotify: {str(e)}")
+
+@router.get("/dashboard")
+async def spotify_dashboard():
+    # Redirect to main dashboard
+    return RedirectResponse(url="/dashboard")
+
+
+# ==== requirements.txt ====
+"""
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+jinja2==3.1.2
+python-multipart==0.0.6
+httpx==0.25.2
+python-dotenv==1.0.0
+google-auth-oauthlib==1.1.0
+google-auth==2.23.4
+google-api-python-client==2.108.0
+pydantic==2.5.0
+"""
