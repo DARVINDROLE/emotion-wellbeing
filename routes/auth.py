@@ -1,44 +1,27 @@
+# routes/auth.py
+
 import os
 import uuid
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import RedirectResponse, JSONResponse
 from google_auth_oauthlib.flow import Flow
-from starlette.responses import HTMLResponse
-from starlette.middleware.sessions import SessionMiddleware
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 
 router = APIRouter()
 
-# 🌐 YOUR DEPLOYED RENDER BACKEND URL
-BASE_URL = "https://your-backend.onrender.com"
-CLIENT_SECRETS_FILE = "client_secret.json"
-REDIRECT_URI = f"{BASE_URL}/callback"
+# Live backend + local frontend
+REDIRECT_URI = "https://emotion-wellbeing.onrender.com/callback"
+FRONTEND_REDIRECT = "http://127.0.0.1:5500/dashboard.html"
 
+CLIENT_SECRETS_FILE = "client_secret.json"
 GOOGLE_SCOPES = [
     'https://www.googleapis.com/auth/fitness.activity.read',
     'https://www.googleapis.com/auth/fitness.heart_rate.read',
     'https://www.googleapis.com/auth/fitness.sleep.read'
 ]
 
-os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'  # Remove in production
+os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'  # safe for local dev
 
-# CORS & Session Setup
-app = FastAPI()
-
-app.add_middleware(SessionMiddleware, secret_key="your-super-secret-key")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["https://your-frontend-website.com"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-app.include_router(router)
-
-
-# In-memory storage (temporary for demo; use Redis or DB in prod)
+# Temporary in-memory state store
 STATE_CACHE = {}
 CREDENTIAL_CACHE = {}
 
@@ -46,13 +29,11 @@ CREDENTIAL_CACHE = {}
 @router.get("/authorize")
 async def authorize():
     state = str(uuid.uuid4())
-    
     flow = Flow.from_client_secrets_file(
         CLIENT_SECRETS_FILE,
         scopes=GOOGLE_SCOPES,
         redirect_uri=REDIRECT_URI
     )
-    
     auth_url, _ = flow.authorization_url(
         access_type='offline',
         include_granted_scopes='true',
@@ -60,8 +41,7 @@ async def authorize():
         prompt='consent'
     )
 
-    STATE_CACHE[state] = True  # store state
-
+    STATE_CACHE[state] = True
     return JSONResponse(content={"auth_url": auth_url})
 
 
@@ -75,9 +55,9 @@ async def callback(request: Request):
     state = request.query_params.get('state')
 
     if not code or not state or state not in STATE_CACHE:
-        return JSONResponse(status_code=400, content={"error": "Invalid request or missing state"})
+        return JSONResponse(status_code=400, content={"error": "Invalid state or code"})
 
-    del STATE_CACHE[state]  # remove used state
+    del STATE_CACHE[state]
 
     flow = Flow.from_client_secrets_file(
         CLIENT_SECRETS_FILE,
@@ -91,28 +71,21 @@ async def callback(request: Request):
         credentials = flow.credentials
 
         from services.google_fit import google_fit_service
-        cred_dict = google_fit_service.credentials_to_dict(credentials)
+        CREDENTIAL_CACHE[state] = google_fit_service.credentials_to_dict(credentials)
 
-        # Store credentials temporarily (you can return access token or save to DB)
-        CREDENTIAL_CACHE[state] = cred_dict
-
-        # Redirect to frontend with a token (or session ID)
-        return RedirectResponse(url=f"https://your-frontend-website.com/dashboard?state={state}")
-
+        return RedirectResponse(url=f"{FRONTEND_REDIRECT}?state={state}")
     except Exception as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
 
 
 @router.get("/credentials")
 async def get_credentials(state: str):
-    creds = CREDENTIAL_CACHE.get(state)
-    if not creds:
-        return JSONResponse(status_code=404, content={"error": "Credentials not found"})
-    return JSONResponse(content=creds)
+    if state not in CREDENTIAL_CACHE:
+        return JSONResponse(status_code=404, content={"error": "No credentials found"})
+    return JSONResponse(content=CREDENTIAL_CACHE[state])
 
 
 @router.get("/logout")
 async def logout(state: str):
     CREDENTIAL_CACHE.pop(state, None)
     return JSONResponse(content={"message": "Logged out"})
-
