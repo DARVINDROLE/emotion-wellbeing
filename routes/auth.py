@@ -10,7 +10,7 @@ router = APIRouter()
 
 # Live backend + local frontend
 REDIRECT_URI = "https://emotion-wellbeing.onrender.com/callback"
-FRONTEND_REDIRECT = "http://127.0.0.1:5500/dashboard.html"
+FRONTEND_REDIRECT = "myapp://auth-success"
 
 CLIENT_SECRETS_FILE = "client_secret.json"
 GOOGLE_SCOPES = [
