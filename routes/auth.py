@@ -1,92 +1,118 @@
 import os
 import uuid
-from fastapi import APIRouter, Request, HTTPException, Depends
-from fastapi.responses import RedirectResponse, HTMLResponse
-from fastapi.templating import Jinja2Templates
+from fastapi import APIRouter, Request, HTTPException
+from fastapi.responses import RedirectResponse, JSONResponse
 from google_auth_oauthlib.flow import Flow
+from starlette.responses import HTMLResponse
+from starlette.middleware.sessions import SessionMiddleware
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 router = APIRouter()
-templates = Jinja2Templates(directory="templates")
 
+# 🌐 YOUR DEPLOYED RENDER BACKEND URL
+BASE_URL = "https://your-backend.onrender.com"
 CLIENT_SECRETS_FILE = "client_secret.json"
+REDIRECT_URI = f"{BASE_URL}/callback"
+
 GOOGLE_SCOPES = [
     'https://www.googleapis.com/auth/fitness.activity.read',
     'https://www.googleapis.com/auth/fitness.heart_rate.read',
     'https://www.googleapis.com/auth/fitness.sleep.read'
 ]
-REDIRECT_URI = 'http://127.0.0.1:5000/callback'
-os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
-@router.get("/", response_class=HTMLResponse)
-async def index(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'  # Remove in production
+
+# CORS & Session Setup
+app = FastAPI()
+
+app.add_middleware(SessionMiddleware, secret_key="your-super-secret-key")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://your-frontend-website.com"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(router)
+
+
+# In-memory storage (temporary for demo; use Redis or DB in prod)
+STATE_CACHE = {}
+CREDENTIAL_CACHE = {}
+
 
 @router.get("/authorize")
-async def authorize(request: Request):
-    # Clear any existing state
-    request.session.pop('oauth_state', None)
-    
+async def authorize():
     state = str(uuid.uuid4())
-    request.session['oauth_state'] = state
     
     flow = Flow.from_client_secrets_file(
         CLIENT_SECRETS_FILE,
         scopes=GOOGLE_SCOPES,
         redirect_uri=REDIRECT_URI
     )
-
+    
     auth_url, _ = flow.authorization_url(
         access_type='offline',
         include_granted_scopes='true',
         state=state,
         prompt='consent'
     )
-    
-    return RedirectResponse(url=auth_url)
+
+    STATE_CACHE[state] = True  # store state
+
+    return JSONResponse(content={"auth_url": auth_url})
+
 
 @router.get("/callback")
 async def callback(request: Request):
-    # Check for error parameter
-    if request.query_params.get('error'):
-        error = request.query_params.get('error')
-        error_description = request.query_params.get('error_description', 'No description provided')
-        raise HTTPException(status_code=400, detail=f"Authorization error: {error} - {error_description}")
-    
-    # Check for missing code
-    if not request.query_params.get('code'):
-        raise HTTPException(status_code=400, detail="No authorization code received")
-    
-    # State validation
-    received_state = request.query_params.get('state')
-    stored_state = request.session.get('oauth_state')
-    
-    if not received_state or not stored_state or received_state != stored_state:
-        raise HTTPException(status_code=400, detail="Invalid state parameter")
+    error = request.query_params.get('error')
+    if error:
+        return JSONResponse(status_code=400, content={"error": error})
 
-    # Create flow and fetch token
+    code = request.query_params.get('code')
+    state = request.query_params.get('state')
+
+    if not code or not state or state not in STATE_CACHE:
+        return JSONResponse(status_code=400, content={"error": "Invalid request or missing state"})
+
+    del STATE_CACHE[state]  # remove used state
+
     flow = Flow.from_client_secrets_file(
         CLIENT_SECRETS_FILE,
         scopes=GOOGLE_SCOPES,
         redirect_uri=REDIRECT_URI,
-        state=stored_state
+        state=state
     )
 
     try:
         flow.fetch_token(authorization_response=str(request.url))
         credentials = flow.credentials
-        
+
         from services.google_fit import google_fit_service
-        request.session['credentials'] = google_fit_service.credentials_to_dict(credentials)
-        
-        # Clear the state after successful authentication
-        request.session.pop('oauth_state', None)
-        
-        return RedirectResponse(url="/dashboard")
-        
+        cred_dict = google_fit_service.credentials_to_dict(credentials)
+
+        # Store credentials temporarily (you can return access token or save to DB)
+        CREDENTIAL_CACHE[state] = cred_dict
+
+        # Redirect to frontend with a token (or session ID)
+        return RedirectResponse(url=f"https://your-frontend-website.com/dashboard?state={state}")
+
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error during authentication: {str(e)}")
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+
+@router.get("/credentials")
+async def get_credentials(state: str):
+    creds = CREDENTIAL_CACHE.get(state)
+    if not creds:
+        return JSONResponse(status_code=404, content={"error": "Credentials not found"})
+    return JSONResponse(content=creds)
+
 
 @router.get("/logout")
-async def logout(request: Request):
-    request.session.clear()
-    return RedirectResponse(url="/")
+async def logout(state: str):
+    CREDENTIAL_CACHE.pop(state, None)
+    return JSONResponse(content={"message": "Logged out"})
+
