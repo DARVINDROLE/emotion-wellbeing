@@ -8,7 +8,7 @@ router = APIRouter()
 
 # LIVE REDIRECT URL (Google must be configured to allow this)
 REDIRECT_URI = "https://emotion-wellbeing.onrender.com/callback"
-DEEP_LINK_URI = "myapp://auth-success"  # Custom scheme for Android deep linking
+FRONTEND_REDIRECT = "https://emotion-wellbeing.onrender.com/api/dashboard"  # ✅ Updated redirect target
 
 CLIENT_SECRETS_FILE = "client_secret.json"
 GOOGLE_SCOPES = [
@@ -70,8 +70,8 @@ async def callback(request: Request):
         from services.google_fit import google_fit_service
         CREDENTIAL_CACHE[state] = google_fit_service.credentials_to_dict(credentials)
 
-        # 🔁 Return to Android app via deep link with `state`
-        return RedirectResponse(url=f"{DEEP_LINK_URI}?state={state}")
+        # ✅ Redirect to your dashboard API endpoint after login
+        return RedirectResponse(url=FRONTEND_REDIRECT)
 
     except Exception as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
