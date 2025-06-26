@@ -6,9 +6,9 @@ from google_auth_oauthlib.flow import Flow
 
 router = APIRouter()
 
-# LIVE REDIRECT URL (Google must be configured to allow this)
+# LIVE REDIRECT URL (must match what you added in Google Cloud Console)
 REDIRECT_URI = "https://emotion-wellbeing.onrender.com/callback"
-FRONTEND_REDIRECT = "https://emotion-wellbeing.onrender.com/api/dashboard"  # ✅ Updated redirect target
+FRONTEND_REDIRECT = "myapp://auth-success"  # ✅ Android Deep Link
 
 CLIENT_SECRETS_FILE = "client_secret.json"
 GOOGLE_SCOPES = [
@@ -17,12 +17,11 @@ GOOGLE_SCOPES = [
     'https://www.googleapis.com/auth/fitness.sleep.read'
 ]
 
-os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'  # Only for local/HTTP dev
+os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'  # ✅ Only for HTTP/local dev (not needed in production HTTPS)
 
-# Temporary stores (in-memory)
+# Temporary stores (in-memory; replace with DB/Redis for production)
 STATE_CACHE = {}
 CREDENTIAL_CACHE = {}
-
 
 @router.get("/authorize")
 async def authorize():
@@ -70,8 +69,8 @@ async def callback(request: Request):
         from services.google_fit import google_fit_service
         CREDENTIAL_CACHE[state] = google_fit_service.credentials_to_dict(credentials)
 
-        # ✅ Redirect to your dashboard API endpoint after login
-        return RedirectResponse(url=FRONTEND_REDIRECT)
+        # ✅ Redirect to Android app with state
+        return RedirectResponse(url=f"{FRONTEND_REDIRECT}?state={state}")
 
     except Exception as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
@@ -88,4 +87,3 @@ async def get_credentials(state: str):
 async def logout(state: str):
     CREDENTIAL_CACHE.pop(state, None)
     return JSONResponse(content={"message": "Logged out"})
-
