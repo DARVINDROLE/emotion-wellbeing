@@ -1,5 +1,3 @@
-# routes/auth.py
-
 import os
 import uuid
 from fastapi import APIRouter, Request, HTTPException
@@ -8,9 +6,9 @@ from google_auth_oauthlib.flow import Flow
 
 router = APIRouter()
 
-# Live backend + local frontend
+# LIVE REDIRECT URL (Google must be configured to allow this)
 REDIRECT_URI = "https://emotion-wellbeing.onrender.com/callback"
-FRONTEND_REDIRECT = "myapp://auth-success"
+DEEP_LINK_URI = "myapp://auth-success"  # Custom scheme for Android deep linking
 
 CLIENT_SECRETS_FILE = "client_secret.json"
 GOOGLE_SCOPES = [
@@ -19,9 +17,9 @@ GOOGLE_SCOPES = [
     'https://www.googleapis.com/auth/fitness.sleep.read'
 ]
 
-os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'  # safe for local dev
+os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'  # Only for local/HTTP dev
 
-# Temporary in-memory state store
+# Temporary stores (in-memory)
 STATE_CACHE = {}
 CREDENTIAL_CACHE = {}
 
@@ -40,7 +38,6 @@ async def authorize():
         state=state,
         prompt='consent'
     )
-
     STATE_CACHE[state] = True
     return JSONResponse(content={"auth_url": auth_url})
 
@@ -73,7 +70,9 @@ async def callback(request: Request):
         from services.google_fit import google_fit_service
         CREDENTIAL_CACHE[state] = google_fit_service.credentials_to_dict(credentials)
 
-        return RedirectResponse(url=f"{FRONTEND_REDIRECT}?state={state}")
+        # 🔁 Return to Android app via deep link with `state`
+        return RedirectResponse(url=f"{DEEP_LINK_URI}?state={state}")
+
     except Exception as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
 
@@ -89,3 +88,4 @@ async def get_credentials(state: str):
 async def logout(state: str):
     CREDENTIAL_CACHE.pop(state, None)
     return JSONResponse(content={"message": "Logged out"})
+
